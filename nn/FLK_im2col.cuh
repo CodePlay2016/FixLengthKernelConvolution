@@ -26,21 +26,19 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
   const int dilation_h, const int dilation_w,
   const int channel_in,  const int channel_out,
   const int height_col, const int width_col,
-  DType* data_col) { // (c_out*c_in*kmax,H,W,)
+  DType* data_col, bool flag) { // (c_out*c_in*kmax,H,W,)
   CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
-    // index index of output matrix
-    const int w_col = index % width_col; // index width in a certain height
-    const int h_col = (index / width_col) % height_col; // index height in a certain Cin
-    const int c_im = ((index / width_col) / height_col) % channel_in; // index Cin in a certain Cout
-    const int c_col_out = ((index / width_col) / height_col) / channel_in; // index c_out
-	const int c_col = c_col_out * kernel_max;
-	const int f_index = (index / width_col) / height_col;
+	// index index of output matrix
+    const int w_col = index % width_col; // index element in a certain width
+    const int h_col = (index / width_col) % height_col; // index a width in a certain Height
+    const int c_im = ((index / width_col) / height_col) % channel_in; // index a Height in a certain Cin
+    const int c_col_out = ((index / width_col) / height_col) / channel_in; // index a Cin in a certain Cout/ index Cout
 
     const int h_offset = h_col * stride_h - pad_h;
     const int w_offset = w_col * stride_w - pad_w;
-    DType* data_col_ptr = data_col + ((c_col * channel_in + c_im) * height_col + h_col) * width_col + w_col;
+    DType* data_col_ptr = data_col + ((c_col_out * channel_in + c_im) * kernel_max * height_col + h_col) * width_col + w_col;
     const DType* data_im_ptr = data_im + (c_im * height + h_offset) * width + w_offset;
-    const DType* kernel_mask_ptr = kernel_mask + f_index;
+    const DType* kernel_mask_ptr = kernel_mask + (c_col_out * channel_in + c_im) * kernel_max ;
 
     for (int k = 0; k < kernel_max; ++k) {
 		int k_index = (int) kernel_mask_ptr[k];
@@ -51,8 +49,17 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
         *data_col_ptr =
             (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
             data_im_ptr[i * dilation_h * width + j * dilation_w] : static_cast<DType>(0);
+		/*
+		if (flag && !(index % 100)) {
+			printf("**data_col_ptr with index of %d/%d is %d, value of it is %f, k_index is %d, kernel_mask_ptr is %d, data_im_ptr value is: %f\n"
+                  "c_col_out: %d, c_im: %d, h_col: %d, w_col: %d, h_im: %d, w_im: %d, height:%d, width:%d, data_col at this pos is %f\n",
+                  index, n, data_col_ptr-data_col, *data_col_ptr, 
+				  k_index, (c_col_out * channel_in + c_im), data_im_ptr[i*dilation_h*width+j*dilation_w],
+				  c_col_out, c_im, h_col, w_col, h_im, w_im, height, width, data_col[((c_col*channel_in+c_im)*height_col+h_col)*width_col+w_col]);
+		}
+		*/
         data_col_ptr += height_col * width_col;
-    }
+	}
   }
 }
 
@@ -75,7 +82,7 @@ inline void FLK_im2col(mshadow::Stream<gpu>* s,
   const DType* data_im, const DType* kernel_mask, const TShape& km_shape,
   const TShape& im_shape, const TShape& col_shape, const TShape& kernel_shape,
   const TShape& pad, const TShape& stride, const TShape& dilation,
-  DType* data_col) {
+  DType* data_col, bool flag) {
   // num_axes should be smaller than block size
   index_t num_spatial_axes = kernel_shape.ndim();
   CHECK_LT(num_spatial_axes, mshadow::cuda::kBaseThreadNum);
@@ -83,13 +90,17 @@ inline void FLK_im2col(mshadow::Stream<gpu>* s,
   using namespace mxnet_op;
   switch (num_spatial_axes) {
   case 2:
+	if (flag)
+		printf("col_shape: %d, %d, %d\nkm_shape: %d, %d, %d\n",
+	           (int)col_shape[0], (int)col_shape[1], (int)col_shape[2],
+			   (int)km_shape[0], (int)km_shape[1], (int)km_shape[2]);
     FLK_im2col_gpu_kernel<DType> // NOLINT_NEXT_LINE(whitespace/operators)
         <<<cuda_get_num_blocks(num_kernels), mshadow::cuda::kBaseThreadNum,
            0, mshadow::Stream<gpu>::GetStream(s)>>>(
         num_kernels, data_im, kernel_mask, im_shape[2], im_shape[3], 
 		km_shape[2], kernel_shape[0], kernel_shape[1], 
         pad[0], pad[1], stride[0], stride[1], dilation[0], dilation[1],
-        col_shape[1], col_shape[2], km_shape[1], km_shape[2], data_col);
+        km_shape[1], km_shape[0], col_shape[1], col_shape[2], data_col, flag);
     MSHADOW_CUDA_POST_KERNEL_CHECK(FLK_im2col_gpu_kernel);
     break;
   default:
