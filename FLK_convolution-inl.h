@@ -129,6 +129,15 @@ class FixLengthKernelConvolutionOp : public Operator {
 	LOG(INFO) << "output_3d shape is " << num_ << " " << conv_out_channels_ << " " << N;
 	Tensor<xpu, 3, DType> output_3d = out_data[conv::kOut].get_with_shape<xpu, 3, DType>(
       Shape3(num_, conv_out_channels_, N), s); // (B, Cout, H*W)
+	
+	// initialize broadcast shapes
+	Tensor<xpu, 2, DType> weight_2d = weight_3d[0];
+	Tensor<xpu, 2, DType> col_buffer_2d = col_buffer_3d[0];
+	Tensor<xpu, 2, DType> output_buffer_2d = output_buffer_3d[0];
+	TShape new_lshape, new_rshape, new_oshape;
+	int ndim = BinaryBroadcastShapeCompact(weight_2d.shape_,
+									   col_buffer_2d.shape_, output_buffer_2d.shape_,
+									   &new_lshape, &new_rshape, &new_oshape);
 
 	bool flag1 = true;
 	bool flag2 = true;
@@ -158,10 +167,6 @@ class FixLengthKernelConvolutionOp : public Operator {
 		Tensor<xpu, 2, DType> weight_2d = weight_3d[g];
 		Tensor<xpu, 2, DType> col_buffer_2d = col_buffer_3d[g];
 		Tensor<xpu, 2, DType> output_buffer_2d = output_buffer_3d[g];
-		TShape new_lshape, new_rshape, new_oshape;
-        int ndim = BinaryBroadcastShapeCompact(weight_2d.shape_,
-                                           col_buffer_2d.shape_, output_buffer_2d.shape_,
-                                           &new_lshape, &new_rshape, &new_oshape);
 		BROADCAST_NDIM_SWITCH(ndim, NDim, {
 			Shape<NDim> ooshape = new_oshape.get<NDim>();
 			Shape<NDim> lstride = mxnet_op::calc_stride(new_lshape.get<NDim>());
