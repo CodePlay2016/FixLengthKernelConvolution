@@ -84,6 +84,8 @@ class MyConvolutionOp : public Operator {
     const std::vector<OpReqType> &req,
     const std::vector<TBlob> &out_data,
     const std::vector<TBlob> &aux_args) {
+    clock_t sstart, start, end;
+    sstart = clock();
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(req[conv::kOut], kWriteTo);
@@ -105,7 +107,6 @@ class MyConvolutionOp : public Operator {
     Tensor<xpu, 4, DType> output_4d = out_data[conv::kOut].get_with_shape<xpu, 4, DType>(
       Shape4(num_, group_, M, N), s);
       
-    clock_t sstart, start, end;
 	bool flag = true;
 
     // no need to allocating memory and reordering in memory
@@ -133,7 +134,6 @@ class MyConvolutionOp : public Operator {
       TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
       Tensor<xpu, 3, DType> col_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
         Shape3(group_, K, N), s);
-      sstart = clock();
       for (index_t n = 0; n < num_; ++n) {
         // transform image to col_buffer in order to use gemm
 		start = clock();
@@ -152,9 +152,8 @@ class MyConvolutionOp : public Operator {
             req[conv::kOut]);
         }
       }
-      end = clock();
-      LOG(INFO) << "total Myconv time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
     }
+    end = clock();
 
     if (bias_term_) {
       Tensor<xpu, 1, DType> bias = in_data[conv::kBias].get<xpu, 1, DType>(s);
@@ -163,6 +162,7 @@ class MyConvolutionOp : public Operator {
       // has bias term, broadcast it to the same shape of output_3d in channel dim
       output_3d += mshadow::expr::broadcast<1>(bias, output_3d.shape_);
     }
+    LOG(INFO) << "total Myconv time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
   }
 
   virtual void Backward(const OpContext &ctx,

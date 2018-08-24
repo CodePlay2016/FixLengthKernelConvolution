@@ -146,7 +146,7 @@ if __name__ == '__main__':
     mx.random.seed(128)
     Cout = 16
     kernel_max = 3
-    N, Cin, Height, Width = (128,3,10,10)
+    N, Cin, Height, Width = (1,3,10,10)
     # mask = get_random_mask(Cout,Cin,(3,3),kernel_max).as_in_context(ctx)
     mask = nd.array([[[0,1,2]]*Cin]*Cout, dtype='float32',ctx=ctx)
     weight = nd.random.normal(0,1e-2,(Cout,Cin,kernel_max))
@@ -163,7 +163,7 @@ if __name__ == '__main__':
     amount = 10
     for _ in range(amount):
         out1 = net(inpt)
-    nd.waitall()
+        nd.waitall()
     # out1 = net(inpt)
     timeuse = (time.time() - tic)/amount
 
@@ -174,8 +174,8 @@ if __name__ == '__main__':
     tic = time.time()
     for _ in range(amount):
         out2 = net2(inpt)
+        nd.waitall()
     # out2 = net2(inpt)
-    nd.waitall()
     timeuse2 = (time.time() - tic)/amount
     out2 = out2[:,:,:-2,1:-1]
     # net3 = Conv(Cout,Cin, (kernel_max,1),weight_initializer=mx.init.Constant(weight.expand_dims(3)))

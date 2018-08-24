@@ -18,7 +18,7 @@ namespace op {
  */
 template <typename DType>
 __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin,H,W)
-  const DType* kernel_mask, // kernel mask (Cout,Cin,k_max)
+  const DType* kernel_mask, const DType* weight, // kernel mask (Cout,Cin,k_max)
   const int height, const int width, const int kernel_max, // pruned kernel size
   const int kernel_h, const int kernel_w,
   const int pad_h, const int pad_w,
@@ -38,24 +38,27 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
     const int w_offset = w_col * stride_w - pad_w;
     DType* data_col_ptr = data_col + ((c_col_out * channel_in + c_im) * kernel_max * height_col + h_col) * width_col + w_col;
     const DType* data_im_ptr = data_im + (c_im * height + h_offset) * width + w_offset;
-    const DType* kernel_mask_ptr = kernel_mask + (c_col_out * channel_in + c_im) * kernel_max ;
+    const DType* kernel_mask_ptr = kernel_mask + (c_col_out * channel_in + c_im) * kernel_max;
+	const DType* weight_ptr = weight + (c_col_out * channel_in + c_im) * kernel_max;
 
     for (int k = 0; k < kernel_max; ++k) {
 		int k_index = (int) kernel_mask_ptr[k];
+		DType w_value = weight_ptr[k];
 		int i = k_index / kernel_w; // index in the domain of kernel_h*kernel_w
 		int j = k_index % kernel_w;
         int h_im = h_offset + i * dilation_h;
         int w_im = w_offset + j * dilation_w;
         *data_col_ptr =
             (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
-            data_im_ptr[i * dilation_h * width + j * dilation_w] : static_cast<DType>(0);
+            data_im_ptr[i * dilation_h * width + j * dilation_w] * w_value : static_cast<DType>(0);
 		/*
 		if (flag && !(index % 100)) {
 			printf("**data_col_ptr with index of %d/%d is %d, value of it is %f, k_index is %d, kernel_mask_ptr is %d, data_im_ptr value is: %f\n"
-                  "c_col_out: %d, c_im: %d, h_col: %d, w_col: %d, h_im: %d, w_im: %d, height:%d, width:%d, data_col at this pos is %f\n",
+                  "c_col_out: %d, c_im: %d, h_col: %d, w_col: %d, h_im: %d, w_im: %d, height:%d, width:%d, data_col at this pos is %f, weight at this pos is %f\n",
                   index, n, data_col_ptr-data_col, *data_col_ptr, 
 				  k_index, (c_col_out * channel_in + c_im), data_im_ptr[i*dilation_h*width+j*dilation_w],
-				  c_col_out, c_im, h_col, w_col, h_im, w_im, height, width, data_col[((c_col*channel_in+c_im)*height_col+h_col)*width_col+w_col]);
+				  c_col_out, c_im, h_col, w_col, h_im, w_im, height,
+				  width, data_col[((c_col_out*channel_in+c_im)*kernel_max*height_col+h_col)*width_col+w_col], w_value);
 		}
 		*/
         data_col_ptr += height_col * width_col;
@@ -63,9 +66,12 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
   }
 }
 
-
+/*!
+ * \brief FLK_im2col gpu kernel. version2
+ * DO NOT call this directly. Use wrapper function im2col() instead;
+ */
 template <typename DType>
-__global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin,H,W)
+__global__ void FLK_im2col_gpu_kernel2(const int n, const DType* data_im, // (Cin,H,W)
   const DType* kernel_mask, // kernel mask (Cout,Cin,k_max)
   const int height, const int width, const int kernel_max, // pruned kernel size
   const int kernel_h, const int kernel_w,
@@ -77,39 +83,13 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
   DType* data_col, bool flag) { // (c_out*c_in*kmax,H,W,)
   CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
 	// index index of output matrix
-    const int w_col = index % width_col; // index element in a certain width
-    const int h_col = (index / width_col) % height_col; // index a width in a certain Height
-    const int c_im = ((index / width_col) / height_col) % channel_in; // index a Height in a certain Cin
-    const int c_col_out = ((index / width_col) / height_col) / channel_in; // index a Cin in a certain Cout/ index Cout
-
-    const int h_offset = h_col * stride_h - pad_h;
-    const int w_offset = w_col * stride_w - pad_w;
-    DType* data_col_ptr = data_col + ((c_col_out * channel_in + c_im) * kernel_max * height_col + h_col) * width_col + w_col;
-    const DType* data_im_ptr = data_im + (c_im * height + h_offset) * width + w_offset;
-    const DType* kernel_mask_ptr = kernel_mask + (c_col_out * channel_in + c_im) * kernel_max ;
-
-    for (int k = 0; k < kernel_max; ++k) {
-		int k_index = (int) kernel_mask_ptr[k];
-		int i = k_index / kernel_w; // index in the domain of kernel_h*kernel_w
-		int j = k_index % kernel_w;
-        int h_im = h_offset + i * dilation_h;
-        int w_im = w_offset + j * dilation_w;
-        *data_col_ptr =
-            (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
-            data_im_ptr[i * dilation_h * width + j * dilation_w] : static_cast<DType>(0);
-		/*
-		if (flag && !(index % 100)) {
-			printf("**data_col_ptr with index of %d/%d is %d, value of it is %f, k_index is %d, kernel_mask_ptr is %d, data_im_ptr value is: %f\n"
-                  "c_col_out: %d, c_im: %d, h_col: %d, w_col: %d, h_im: %d, w_im: %d, height:%d, width:%d, data_col at this pos is %f\n",
-                  index, n, data_col_ptr-data_col, *data_col_ptr, 
-				  k_index, (c_col_out * channel_in + c_im), data_im_ptr[i*dilation_h*width+j*dilation_w],
-				  c_col_out, c_im, h_col, w_col, h_im, w_im, height, width, data_col[((c_col*channel_in+c_im)*height_col+h_col)*width_col+w_col]);
-		}
-		*/
-        data_col_ptr += height_col * width_col;
+	DType* ptr = data_col + index*kernel_max;
+    for (int k = 0; k < kernel_max; k++) {
+		*ptr = DType(0.2);
 	}
   }
 }
+
 
 
 /*!\brief
@@ -127,7 +107,7 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
  */
 template <typename DType>
 inline void FLK_im2col(mshadow::Stream<gpu>* s,
-  const DType* data_im, const DType* kernel_mask, const TShape& km_shape,
+  const DType* data_im, const DType* kernel_mask, const DType* weight, const TShape& km_shape,
   const TShape& im_shape, const TShape& col_shape, const TShape& kernel_shape,
   const TShape& pad, const TShape& stride, const TShape& dilation,
   DType* data_col, bool flag) {
@@ -138,14 +118,14 @@ inline void FLK_im2col(mshadow::Stream<gpu>* s,
   using namespace mxnet_op;
   switch (num_spatial_axes) {
   case 2:
-	if (flag)
-		printf("col_shape: %d, %d, %d\nkm_shape: %d, %d, %d\n",
-	           (int)col_shape[0], (int)col_shape[1], (int)col_shape[2],
-			   (int)km_shape[0], (int)km_shape[1], (int)km_shape[2]);
+	//if (flag)
+	//	printf("col_shape: %d, %d, %d\nkm_shape: %d, %d, %d\n",
+	//           (int)col_shape[0], (int)col_shape[1], (int)col_shape[2],
+	//		   (int)km_shape[0], (int)km_shape[1], (int)km_shape[2]);
     FLK_im2col_gpu_kernel<DType> // NOLINT_NEXT_LINE(whitespace/operators)
         <<<cuda_get_num_blocks(num_kernels), mshadow::cuda::kBaseThreadNum,
            0, mshadow::Stream<gpu>::GetStream(s)>>>(
-        num_kernels, data_im, kernel_mask, im_shape[2], im_shape[3], 
+        num_kernels, data_im, kernel_mask, weight, im_shape[2], im_shape[3], 
 		km_shape[2], kernel_shape[0], kernel_shape[1], 
         pad[0], pad[1], stride[0], stride[1], dilation[0], dilation[1],
         km_shape[1], km_shape[0], col_shape[1], col_shape[2], data_col, flag);

@@ -88,6 +88,10 @@ class FixLengthKernelConvolutionOp : public Operator {
     const std::vector<OpReqType> &req,
     const std::vector<TBlob> &out_data,
     const std::vector<TBlob> &aux_args) {
+
+	clock_t sstart, start, end;
+	sstart = clock();
+
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(req[conv::kOut], kWriteTo);
@@ -100,7 +104,7 @@ class FixLengthKernelConvolutionOp : public Operator {
     Stream<xpu>* s = ctx.get_stream<xpu>();
     // allocate workspace for both col_buffer and out_buffer, so *2 size
     Tensor<xpu, 1, DType> workspace = ctx.requested[conv::kTempSpace]
-      .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_*2), s); 
+      .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_), s); 
     // calculate the shape of col_buffer
     TShape col_buffer_shape(num_spatial_axes_ + 1); // 3
 
@@ -108,73 +112,32 @@ class FixLengthKernelConvolutionOp : public Operator {
     col_buffer_shape[0] = conv_out_channels_ * conv_in_channels_ * param_.kernel_max;
     for (index_t i = 1; i < col_buffer_shape.ndim(); ++i) {
       col_buffer_shape[i] = out_data[0].shape_[i + 1];
-    } //
+    }
     // create a column buffer using workspace and col_buffer_shape (c_out*c_in*kmax,H,W,)
     TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
-	DType* ptr_ = workspace.dptr_ + col_buffer_size_;
-    TBlob output_buffer(ptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
 
     // initialize weight and col_buffer 3D tensors for using gemm
     index_t M = conv_out_channels_ / group_; // Cout/group
     index_t N = conv_out_spatial_dim_; // H*W
     index_t K = kernel_dim_; //cin/group*kmax
 
-    Tensor<xpu, 3, DType> weight_3d = in_data[conv::kWeight].get_with_shape<xpu, 3, DType>(
-      Shape3(group_, M * K, 1), s); // get_with_shape = reshape
-    Tensor<xpu, 3, DType> col_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
-      Shape3(group_, M * K, N), s); // (g, Cout/g*Cin/g*kmax, H*W)
-	Tensor<xpu, 3, DType> output_buffer_3d = output_buffer.get_with_shape<xpu, 3, DType>(
-      Shape3(group_, M * K, N), s); // (g, Cout/g*Cin/g*kmax, H*W)
-	LOG(INFO) << "in_data[conv::kOut].shape_ is " << out_data[conv::kOut].shape_[0] << " " << out_data[conv::kOut].shape_[1] << " " << out_data[conv::kOut].shape_[2];
-	LOG(INFO) << "output_3d shape is " << num_ << " " << conv_out_channels_ << " " << N;
 	Tensor<xpu, 3, DType> output_3d = out_data[conv::kOut].get_with_shape<xpu, 3, DType>(
       Shape3(num_, conv_out_channels_, N), s); // (B, Cout, H*W)
 	
-	// initialize broadcast shapes
-	Tensor<xpu, 2, DType> weight_2d = weight_3d[0];
-	Tensor<xpu, 2, DType> col_buffer_2d = col_buffer_3d[0];
-	Tensor<xpu, 2, DType> output_buffer_2d = output_buffer_3d[0];
-	TShape new_lshape, new_rshape, new_oshape;
-	int ndim = BinaryBroadcastShapeCompact(weight_2d.shape_,
-									   col_buffer_2d.shape_, output_buffer_2d.shape_,
-									   &new_lshape, &new_rshape, &new_oshape);
-
-	bool flag1 = true;
+	//bool flag1 = true;
 	bool flag2 = true;
 	bool flag = true;
-	clock_t sstart, start, end;
-	
-	sstart = clock();
     for (index_t n = 0; n < num_; ++n) {
       // transform image to col_buffer in order to use gemm
 	  start = clock();
       FLK_im2col(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
         in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
+		in_data[conv::kWeight].dptr<DType>() + n*kernel_masks_dim_,
 		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
         col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
         col_buffer.dptr<DType>(), flag);
 	  flag = false;
-	  end = clock();
-	  if (flag1) {
-	    LOG(INFO) << "FLK_im2col time use " << (double)(end-start)/CLOCKS_PER_SEC;
-	  }
 	  
-	  start = clock();
-      for (index_t g = 0; g < group_; ++g) {
-        // Legacy approach shown here for comparison:
-        //   Assign(output_3d[g], req[conv::kOut], dot(weight_3d[g], col_buffer_3d[g]));
-		// broadcast multiplication
-		Tensor<xpu, 2, DType> weight_2d = weight_3d[g];
-		Tensor<xpu, 2, DType> col_buffer_2d = col_buffer_3d[g];
-		Tensor<xpu, 2, DType> output_buffer_2d = output_buffer_3d[g];
-		BROADCAST_NDIM_SWITCH(ndim, NDim, {
-			Shape<NDim> ooshape = new_oshape.get<NDim>();
-			Shape<NDim> lstride = mxnet_op::calc_stride(new_lshape.get<NDim>());
-			Shape<NDim> rstride = mxnet_op::calc_stride(new_rshape.get<NDim>());
-			mxnet_op::Kernel<mxnet_op::binary_broadcast_kernel<NDim, DType, mshadow_op::mul>, xpu>::
-			template LaunchEx(s, new_oshape.Size(), req[conv::kOut], lstride, rstride, ooshape,
-			weight_2d.dptr_, col_buffer_2d.dptr_, output_buffer_2d.dptr_);
-		});
 	  /*
 	  if (flag1) {
 		Tensor<cpu, 2, DType> out_buffer_2d_cpu = NewTensor<cpu, DType>(output_buffer_2d.shape_,DType(1));
@@ -190,20 +153,20 @@ class FixLengthKernelConvolutionOp : public Operator {
 		  }
 	  }
 	  */
-	  flag1 = false;
-      }
-	  
-	  end = clock();
+	  //flag1 = false;
+      
 	  if (flag2) {
-	    LOG(INFO) << "binary_broadcast_kernel time use " << (double)(end-start)/CLOCKS_PER_SEC;
+	    LOG(INFO) << "FLK_im2col time use " << (double)(clock()-start)/CLOCKS_PER_SEC;
 	    flag2 = false;
 	  }
+	  start = clock();
 	  Tensor<xpu, 2, DType> output_2d = output_3d[n];
-	  Tensor<xpu, 3, DType> output_buffer_3d = output_buffer.get_with_shape<xpu, 3, DType>(
+	  Tensor<xpu, 3, DType> output_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
 	    Shape3(conv_out_channels_, K, N), s);
 	  //Tensor<xpu, 3, DType> output_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
 	    //Shape3(conv_out_channels_, K, N), s);
 	  output_2d = reduce_with_axis<red::sum, false>(output_buffer_3d, 1);
+	  LOG(INFO) << "reduce_with_axis time use " << (double)(clock()-start)/CLOCKS_PER_SEC;
     }
 	end = clock();
 	LOG(INFO) << "one conv time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
@@ -286,6 +249,7 @@ class FixLengthKernelConvolutionOp : public Operator {
       // gradient w.r.t. weight, dWeight should accumulate across the batch and group
       FLK_im2col(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
               in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
+              in_data[conv::kWeight].dptr<DType>() + n*kernel_masks_dim_,
       		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
               col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
               col_buffer.dptr<DType>(), flag);
