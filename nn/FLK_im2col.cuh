@@ -64,6 +64,54 @@ __global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin
 }
 
 
+template <typename DType>
+__global__ void FLK_im2col_gpu_kernel(const int n, const DType* data_im, // (Cin,H,W)
+  const DType* kernel_mask, // kernel mask (Cout,Cin,k_max)
+  const int height, const int width, const int kernel_max, // pruned kernel size
+  const int kernel_h, const int kernel_w,
+  const int pad_h, const int pad_w,
+  const int stride_h, const int stride_w,
+  const int dilation_h, const int dilation_w,
+  const int channel_in,  const int channel_out,
+  const int height_col, const int width_col,
+  DType* data_col, bool flag) { // (c_out*c_in*kmax,H,W,)
+  CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
+	// index index of output matrix
+    const int w_col = index % width_col; // index element in a certain width
+    const int h_col = (index / width_col) % height_col; // index a width in a certain Height
+    const int c_im = ((index / width_col) / height_col) % channel_in; // index a Height in a certain Cin
+    const int c_col_out = ((index / width_col) / height_col) / channel_in; // index a Cin in a certain Cout/ index Cout
+
+    const int h_offset = h_col * stride_h - pad_h;
+    const int w_offset = w_col * stride_w - pad_w;
+    DType* data_col_ptr = data_col + ((c_col_out * channel_in + c_im) * kernel_max * height_col + h_col) * width_col + w_col;
+    const DType* data_im_ptr = data_im + (c_im * height + h_offset) * width + w_offset;
+    const DType* kernel_mask_ptr = kernel_mask + (c_col_out * channel_in + c_im) * kernel_max ;
+
+    for (int k = 0; k < kernel_max; ++k) {
+		int k_index = (int) kernel_mask_ptr[k];
+		int i = k_index / kernel_w; // index in the domain of kernel_h*kernel_w
+		int j = k_index % kernel_w;
+        int h_im = h_offset + i * dilation_h;
+        int w_im = w_offset + j * dilation_w;
+        *data_col_ptr =
+            (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+            data_im_ptr[i * dilation_h * width + j * dilation_w] : static_cast<DType>(0);
+		/*
+		if (flag && !(index % 100)) {
+			printf("**data_col_ptr with index of %d/%d is %d, value of it is %f, k_index is %d, kernel_mask_ptr is %d, data_im_ptr value is: %f\n"
+                  "c_col_out: %d, c_im: %d, h_col: %d, w_col: %d, h_im: %d, w_im: %d, height:%d, width:%d, data_col at this pos is %f\n",
+                  index, n, data_col_ptr-data_col, *data_col_ptr, 
+				  k_index, (c_col_out * channel_in + c_im), data_im_ptr[i*dilation_h*width+j*dilation_w],
+				  c_col_out, c_im, h_col, w_col, h_im, w_im, height, width, data_col[((c_col*channel_in+c_im)*height_col+h_col)*width_col+w_col]);
+		}
+		*/
+        data_col_ptr += height_col * width_col;
+	}
+  }
+}
+
+
 /*!\brief
  * gpu function of fix length kernel im2col algorithm
  * \param s device stream
