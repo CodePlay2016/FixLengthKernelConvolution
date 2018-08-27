@@ -1,5 +1,5 @@
-#ifndef MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V2_INL_H_
-#define MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V2_INL_H_
+#ifndef MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V3_INL_H_
+#define MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V3_INL_H_
 
 #include <mxnet/io.h>
 #include <mxnet/base.h>
@@ -28,11 +28,11 @@ namespace mxnet {
 namespace op {
 
 namespace conv {
-  enum FixLengthKernelConvolutionV2OpInputs { kData, kKernelMasks, kWeight, kBias };
-  enum FixLengthKernelConvolutionV2OpOutputs { kOut };
-  enum FixLengthKernelConvolutionV2OpResource { kTempSpace };
+  enum FixLengthKernelConvolutionV3OpInputs { kData, kKernelMasks, kWeight, kBias };
+  enum FixLengthKernelConvolutionV3OpOutputs { kOut };
+  enum FixLengthKernelConvolutionV3OpResource { kTempSpace };
 }
-struct FixLengthKernelConvolutionV2Param : public dmlc::Parameter<FixLengthKernelConvolutionV2Param> {
+struct FixLengthKernelConvolutionV3Param : public dmlc::Parameter<FixLengthKernelConvolutionV3Param> {
   TShape kernel;
   TShape stride;
   TShape dilate;
@@ -43,21 +43,21 @@ struct FixLengthKernelConvolutionV2Param : public dmlc::Parameter<FixLengthKerne
   uint64_t workspace;
   bool no_bias;
   dmlc::optional<int> layout;
-  DMLC_DECLARE_PARAMETER(FixLengthKernelConvolutionV2Param) {
-    DMLC_DECLARE_FIELD(kernel).describe("ConvolutionV2 kernel size: (h, w) or (d, h, w)");
+  DMLC_DECLARE_PARAMETER(FixLengthKernelConvolutionV3Param) {
+    DMLC_DECLARE_FIELD(kernel).describe("ConvolutionV3 kernel size: (h, w) or (d, h, w)");
     DMLC_DECLARE_FIELD(kernel_max).describe("the selected kernel number");
     DMLC_DECLARE_FIELD(stride).set_default(TShape())
-      .describe("ConvolutionV2 stride: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
+      .describe("ConvolutionV3 stride: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
     DMLC_DECLARE_FIELD(dilate).set_default(TShape())
-      .describe("ConvolutionV2 dilate: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
+      .describe("ConvolutionV3 dilate: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
     DMLC_DECLARE_FIELD(pad).set_default(TShape())
-      .describe("Zero pad for ConvolutionV2: (h, w) or (d, h, w). Defaults to no padding.");
+      .describe("Zero pad for ConvolutionV3: (h, w) or (d, h, w). Defaults to no padding.");
     DMLC_DECLARE_FIELD(num_filter).set_range(1, 100000)
-      .describe("ConvolutionV2 filter(channel) number");
+      .describe("ConvolutionV3 filter(channel) number");
     DMLC_DECLARE_FIELD(num_group).set_default(1)
       .describe("Number of group partitions.");
     DMLC_DECLARE_FIELD(workspace).set_default(1024).set_range(0, 8192)
-      .describe("Maximum temperal workspace allowed for ConvolutionV2 (MB).");
+      .describe("Maximum temperal workspace allowed for ConvolutionV3 (MB).");
     DMLC_DECLARE_FIELD(no_bias).set_default(false)
       .describe("Whether to disable bias parameter.");
     DMLC_DECLARE_FIELD(layout)
@@ -71,9 +71,9 @@ struct FixLengthKernelConvolutionV2Param : public dmlc::Parameter<FixLengthKerne
 };
 
 template<typename xpu, typename DType>
-class FixLengthKernelConvolutionV2Op : public Operator {
+class FixLengthKernelConvolutionV3Op : public Operator {
  public:
-  explicit FixLengthKernelConvolutionV2Op(FixLengthKernelConvolutionV2Param p) {
+  explicit FixLengthKernelConvolutionV3Op(FixLengthKernelConvolutionV3Param p) {
     this->param_ = p;
     // convert MBytes first to Bytes and then to elements.
     param_.workspace = (param_.workspace << 20) / sizeof(DType);
@@ -130,7 +130,7 @@ class FixLengthKernelConvolutionV2Op : public Operator {
     for (index_t n = 0; n < num_; ++n) {
       // transform image to col_buffer in order to use gemm
 	  start = clock();
-      FLK_im2col_v2(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
+      FLK_im2col_v3(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
         in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
 		in_data[conv::kWeight].dptr<DType>() + n*kernel_masks_dim_,
 		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
@@ -165,7 +165,7 @@ class FixLengthKernelConvolutionV2Op : public Operator {
 	  output_2d = reduce_with_axis<red::sum, false>(output_buffer_3d, 1);
     }
 	end = clock();
-	LOG(INFO) << "one convV2 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
+	LOG(INFO) << "one convV3 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
 
     if (bias_term_) {
       Tensor<xpu, 1, DType> bias = in_data[conv::kBias].get<xpu, 1, DType>(s);
@@ -304,7 +304,7 @@ class FixLengthKernelConvolutionV2Op : public Operator {
   }
 
  private:
-  FixLengthKernelConvolutionV2Param param_;
+  FixLengthKernelConvolutionV3Param param_;
   index_t channel_axis_;  // channel axis of the input
   index_t channels_;  // number of channels of input image
   index_t num_spatial_axes_;  // number of spatial axes
@@ -326,16 +326,16 @@ class FixLengthKernelConvolutionV2Op : public Operator {
   index_t num_kernels_col2im_;
   bool bias_term_;  // has bias term?
   bool is_1x1_;
-};  // class ConvolutionV2Op
+};  // class ConvolutionV3Op
 
 template<typename xpu>
-Operator* CreateOp(FixLengthKernelConvolutionV2Param param, int dtype,
+Operator* CreateOp(FixLengthKernelConvolutionV3Param param, int dtype,
   std::vector<TShape> *in_shape,
   std::vector<TShape> *out_shape,
   Context ctx);
 
 #if DMLC_USE_CXX11
-class FixLengthKernelConvolutionV2Prop : public OperatorProperty {
+class FixLengthKernelConvolutionV3Prop : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
     if (!param_.no_bias) {
@@ -461,13 +461,13 @@ class FixLengthKernelConvolutionV2Prop : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new FixLengthKernelConvolutionV2Prop();
+    auto ptr = new FixLengthKernelConvolutionV3Prop();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "_contrib_FixLengthKernelConvolutionV2";
+    return "_contrib_FixLengthKernelConvolutionV3";
   }
 
   std::vector<int> DeclareBackwardDependency(
@@ -497,9 +497,9 @@ class FixLengthKernelConvolutionV2Prop : public OperatorProperty {
     std::vector<int> *in_type) const override;
 
  private:
-  FixLengthKernelConvolutionV2Param param_;
-};  // class ConvolutionV2Prop
+  FixLengthKernelConvolutionV3Param param_;
+};  // class ConvolutionV3Prop
 #endif  // DMLC_USE_CXX11
 }  // namespace op
 }  // namespace mxnet
-#endif  // MXNET_OPERATOR_CONTRIB_FLK_ConvolutionV2_INL_H_
+#endif  // MXNET_OPERATOR_CONTRIB_FLK_ConvolutionV3_INL_H_

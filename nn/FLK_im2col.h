@@ -50,6 +50,19 @@ inline void FLK_im2col_v2(mshadow::Stream<cpu>* s,
   }
 }
 
+template <typename DType>
+inline void FLK_im2col_v3(mshadow::Stream<cpu>* s,
+  const DType* data_im, const DType* kernel_mask, const DType* weight, const TShape& kmshape,
+  const TShape& im_shape, const TShape& col_shape, const TShape& kernel_shape,
+  const TShape& pad, const TShape& stride, const TShape& dilation,
+  DType* data_col, bool flag) {
+  if (2 == kernel_shape.ndim()) {
+    LOG(FATAL) << "only implemented in GPU";
+  } else {
+    LOG(FATAL) << "not implemented";
+  }
+}
+
 /*!\brief
  * cpu function of deformable_col2im algorithm
  * \param s device stream
