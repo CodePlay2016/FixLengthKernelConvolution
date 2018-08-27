@@ -11,6 +11,71 @@
 
 namespace mxnet {
 namespace op {
+	
+	
+template <typename DType>
+__global__ void FLK_im2col_gpu_kernel_v4(const int n, const DType* data_im, // (Cin,H,W)
+  const DType* kernel_mask, // kernel mask (Cin,k_max)
+  const int height, const int width, const int kernel_max, // pruned kernel size
+  const int kernel_h, const int kernel_w,
+  const int pad_h, const int pad_w,
+  const int stride_h, const int stride_w,
+  const int dilation_h, const int dilation_w,
+  const int height_col, const int width_col,
+  DType* data_col) { // (c_in*kmax,H,W,)
+  CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
+	// index index of output matrix
+    const int w_col = index % width_col; // index element in a certain width
+    const int h_col = (index / width_col) % height_col; // index a width in a certain Height
+    const int c_im = (index / width_col) / height_col; // index a Height in a certain Cin
+
+    const int h_offset = h_col * stride_h - pad_h;
+    const int w_offset = w_col * stride_w - pad_w;
+    DType* data_col_ptr = data_col + (c_im * kernel_max * height_col + h_col) * width_col + w_col;
+    const DType* data_im_ptr = data_im + (c_im * height + h_offset) * width + w_offset;
+    const DType* kernel_mask_ptr = kernel_mask + c_im * kernel_max;
+
+    for (int k = 0; k < kernel_max; ++k) {
+		int k_index = (int) kernel_mask_ptr[k];
+		int i = k_index / kernel_w; // index in the domain of kernel_h*kernel_w
+		int j = k_index % kernel_w;
+        int h_im = h_offset + i * dilation_h;
+        int w_im = w_offset + j * dilation_w;
+        *data_col_ptr =
+            (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) ?
+            data_im_ptr[i * dilation_h * width + j * dilation_w] : static_cast<DType>(0);
+        data_col_ptr += height_col * width_col;
+	}
+  }
+}
+
+template <typename DType>
+inline void FLK_im2col_v4(mshadow::Stream<gpu>* s,
+  const DType* data_im, const DType* kernel_mask, const TShape& km_shape,
+  const TShape& im_shape, const TShape& col_shape, const TShape& kernel_shape,
+  const TShape& pad, const TShape& stride, const TShape& dilation,
+  DType* data_col) {
+  // num_axes should be smaller than block size
+  index_t num_spatial_axes = kernel_shape.ndim();
+  CHECK_LT(num_spatial_axes, mshadow::cuda::kBaseThreadNum);
+  index_t num_kernels = km_shape[0] * col_shape.ProdShape(1, col_shape.ndim());
+  using namespace mxnet_op;
+  switch (num_spatial_axes) {
+  case 2:
+    FLK_im2col_gpu_kernel_v4<DType> // NOLINT_NEXT_LINE(whitespace/operators)
+        <<<cuda_get_num_blocks(num_kernels), mshadow::cuda::kBaseThreadNum,
+           0, mshadow::Stream<gpu>::GetStream(s)>>>(
+        num_kernels, data_im, kernel_mask, im_shape[2], im_shape[3], 
+		km_shape[1], kernel_shape[0], kernel_shape[1], 
+        pad[0], pad[1], stride[0], stride[1], dilation[0], dilation[1],
+        col_shape[1], col_shape[2], data_col);
+    MSHADOW_CUDA_POST_KERNEL_CHECK(FLK_im2col_gpu_kernel);
+    break;
+  default:
+    LOG(FATAL) << "im2col_nd_gpu does not support computation with "
+               << num_spatial_axes << " spatial axes";
+  }
+}
 
 template <typename DType>
 __global__ void FLK_im2col_gpu_kernel_v3(const int n, const DType* data_im, // (Cin,H,W)
@@ -63,7 +128,7 @@ inline void FLK_im2col_v3(mshadow::Stream<gpu>* s,
   // num_axes should be smaller than block size
   index_t num_spatial_axes = kernel_shape.ndim();
   CHECK_LT(num_spatial_axes, mshadow::cuda::kBaseThreadNum);
-  index_t num_kernels = km_shape[0] * km_shape[1] * col_shape.ProdShape(1, col_shape.ndim());
+  index_t num_kernels = km_shape[1] * col_shape.ProdShape(1, col_shape.ndim());
   using namespace mxnet_op;
   switch (num_spatial_axes) {
   case 2:
@@ -294,7 +359,7 @@ __global__ void FLK_col2im_gpu_kernel(const int n, const DType* data_col, const 
     const DType cur_inv_h_data = h_in + i * dilation_h + offset_h;
     const DType cur_inv_w_data = w_in + j * dilation_w + offset_w;
 
-    const DType cur_top_grad = data_col[index];
+    //const DType cur_top_grad = data_col[index];
     const int cur_h = (int)cur_inv_h_data;
     const int cur_w = (int)cur_inv_w_data;
     for (int dy = -2; dy <= 2; dy++) {

@@ -117,7 +117,6 @@ class FixLengthKernelConvolutionV2Op : public Operator {
     TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
 
     // initialize weight and col_buffer 3D tensors for using gemm
-    index_t M = conv_out_channels_ / group_; // Cout/group
     index_t N = conv_out_spatial_dim_; // H*W
     index_t K = kernel_dim_; //cin/group*kmax
 
@@ -131,8 +130,8 @@ class FixLengthKernelConvolutionV2Op : public Operator {
       // transform image to col_buffer in order to use gemm
 	  start = clock();
       FLK_im2col_v2(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
-        in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
-		in_data[conv::kWeight].dptr<DType>() + n*kernel_masks_dim_,
+        in_data[conv::kKernelMasks].dptr<DType>(),
+		in_data[conv::kWeight].dptr<DType>(),
 		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
         col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
         col_buffer.dptr<DType>(), flag);
@@ -373,7 +372,6 @@ class FixLengthKernelConvolutionV2Prop : public OperatorProperty {
     }
     out_shape->resize(1, TShape());
     const TShape &dshp = (*in_shape)[conv::kData];
-    const TShape &kmshp = (*in_shape)[conv::kKernelMasks];
     const TShape &wshp = (*in_shape)[conv::kWeight];
     if (dshp.ndim() == 0) return false;
     if (param_.kernel.ndim() == 2) {
@@ -383,8 +381,6 @@ class FixLengthKernelConvolutionV2Prop : public OperatorProperty {
       CHECK_EQ(wshp.ndim(), 3U) \
         << "Input weight should be 3D in num_filter-Cin-kmax";
       Shape<4> dshape = ConvertLayout(dshp.get<4>(), param_.layout.value(), kNCHW);
-      Shape<3> kmshape = Shape3(param_.num_filter / param_.num_group, dshape[1] / param_.num_group,
-        param_.kernel_max);
       Shape<3> wshape = Shape3(param_.num_filter / param_.num_group, dshape[1] / param_.num_group,
         param_.kernel_max);
       wshape[0] *= param_.num_group;

@@ -1,5 +1,5 @@
-#ifndef MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V3_INL_H_
-#define MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V3_INL_H_
+#ifndef MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V4_INL_H_
+#define MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_V4_INL_H_
 
 #include <mxnet/io.h>
 #include <mxnet/base.h>
@@ -20,19 +20,16 @@
 #include "../nn/im2col.h"
 #include "./nn/FLK_im2col.h"
 #include "../linalg.h"
-#include "../mshadow_op.h"
-#include "../mxnet_op.h"
-#include "../tensor/elemwise_binary_broadcast_op.h"
 
 namespace mxnet {
 namespace op {
 
 namespace conv {
-  enum FixLengthKernelConvolutionV3OpInputs { kData, kKernelMasks, kWeight, kBias };
-  enum FixLengthKernelConvolutionV3OpOutputs { kOut };
-  enum FixLengthKernelConvolutionV3OpResource { kTempSpace };
+  enum FixLengthKernelConvolutionV4OpInputs { kData, kKernelMasks, kWeight, kBias };
+  enum FixLengthKernelConvolutionV4OpOutputs { kOut };
+  enum FixLengthKernelConvolutionV4OpResource { kTempSpace };
 }
-struct FixLengthKernelConvolutionV3Param : public dmlc::Parameter<FixLengthKernelConvolutionV3Param> {
+struct FixLengthKernelConvolutionV4Param : public dmlc::Parameter<FixLengthKernelConvolutionV4Param> {
   TShape kernel;
   TShape stride;
   TShape dilate;
@@ -43,21 +40,21 @@ struct FixLengthKernelConvolutionV3Param : public dmlc::Parameter<FixLengthKerne
   uint64_t workspace;
   bool no_bias;
   dmlc::optional<int> layout;
-  DMLC_DECLARE_PARAMETER(FixLengthKernelConvolutionV3Param) {
-    DMLC_DECLARE_FIELD(kernel).describe("ConvolutionV3 kernel size: (h, w) or (d, h, w)");
+  DMLC_DECLARE_PARAMETER(FixLengthKernelConvolutionV4Param) {
+    DMLC_DECLARE_FIELD(kernel).describe("ConvolutionV4 kernel size: (h, w) or (d, h, w)");
     DMLC_DECLARE_FIELD(kernel_max).describe("the selected kernel number");
     DMLC_DECLARE_FIELD(stride).set_default(TShape())
-      .describe("ConvolutionV3 stride: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
+      .describe("ConvolutionV4 stride: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
     DMLC_DECLARE_FIELD(dilate).set_default(TShape())
-      .describe("ConvolutionV3 dilate: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
+      .describe("ConvolutionV4 dilate: (h, w) or (d, h, w). Defaults to 1 for each dimension.");
     DMLC_DECLARE_FIELD(pad).set_default(TShape())
-      .describe("Zero pad for ConvolutionV3: (h, w) or (d, h, w). Defaults to no padding.");
+      .describe("Zero pad for convolution: (h, w) or (d, h, w). Defaults to no padding.");
     DMLC_DECLARE_FIELD(num_filter).set_range(1, 100000)
-      .describe("ConvolutionV3 filter(channel) number");
+      .describe("ConvolutionV4 filter(channel) number");
     DMLC_DECLARE_FIELD(num_group).set_default(1)
       .describe("Number of group partitions.");
     DMLC_DECLARE_FIELD(workspace).set_default(1024).set_range(0, 8192)
-      .describe("Maximum temperal workspace allowed for ConvolutionV3 (MB).");
+      .describe("Maximum temperal workspace allowed for convolution (MB).");
     DMLC_DECLARE_FIELD(no_bias).set_default(false)
       .describe("Whether to disable bias parameter.");
     DMLC_DECLARE_FIELD(layout)
@@ -71,9 +68,9 @@ struct FixLengthKernelConvolutionV3Param : public dmlc::Parameter<FixLengthKerne
 };
 
 template<typename xpu, typename DType>
-class FixLengthKernelConvolutionV3Op : public Operator {
+class FixLengthKernelConvolutionV4Op : public Operator {
  public:
-  explicit FixLengthKernelConvolutionV3Op(FixLengthKernelConvolutionV3Param p) {
+  explicit FixLengthKernelConvolutionV4Op(FixLengthKernelConvolutionV4Param p) {
     this->param_ = p;
     // convert MBytes first to Bytes and then to elements.
     param_.workspace = (param_.workspace << 20) / sizeof(DType);
@@ -88,62 +85,72 @@ class FixLengthKernelConvolutionV3Op : public Operator {
     const std::vector<OpReqType> &req,
     const std::vector<TBlob> &out_data,
     const std::vector<TBlob> &aux_args) {
-
-	clock_t sstart, end;
-	sstart = clock();
-
+    clock_t sstart, end;
+    sstart = clock();
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(req[conv::kOut], kWriteTo);
     size_t expected = param_.no_bias ? 3 : 4;
     CHECK_EQ(in_data.size(), expected);
     CHECK_EQ(out_data.size(), 1U);
+    CHECK_EQ(req[conv::kOut], kWriteTo);
     LayerSetUp(in_data[conv::kData].shape_,
                in_data[conv::kKernelMasks].shape_,
                out_data[conv::kOut].shape_);
     Stream<xpu>* s = ctx.get_stream<xpu>();
-    // allocate workspace for both col_buffer and out_buffer, so *2 size
-    Tensor<xpu, 1, DType> workspace = ctx.requested[conv::kTempSpace]
-      .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_), s); 
-    // calculate the shape of col_buffer
-    TShape col_buffer_shape(num_spatial_axes_ + 1); // 3
-
-	// add 'conv_out_channels_'
-    col_buffer_shape[0] = conv_out_channels_ * conv_in_channels_ * param_.kernel_max;
-    for (index_t i = 1; i < col_buffer_shape.ndim(); ++i) {
-      col_buffer_shape[i] = out_data[0].shape_[i + 1];
-    }
-    // create a column buffer using workspace and col_buffer_shape (c_out*c_in*kmax,H,W,)
-    TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
 
     // initialize weight and col_buffer 3D tensors for using gemm
-    index_t N = conv_out_spatial_dim_; // H*W
-    index_t K = kernel_dim_; //cin/group*kmax
+    index_t M = conv_out_channels_ / group_;
+    index_t N = conv_out_spatial_dim_;
+    index_t K = kernel_dim_;
+    Tensor<xpu, 3, DType> weight_3d = in_data[conv::kWeight].get_with_shape<xpu, 3, DType>(
+      Shape3(group_, M, K), s);
+    Tensor<xpu, 4, DType> output_4d = out_data[conv::kOut].get_with_shape<xpu, 4, DType>(
+      Shape4(num_, group_, M, N), s);
+      
+	//bool flag = true;
 
-	Tensor<xpu, 3, DType> output_3d = out_data[conv::kOut].get_with_shape<xpu, 3, DType>(
-      Shape3(num_, conv_out_channels_, N), s); // (B, Cout, H*W)
-	
-	//bool flag1 = true;
-	//bool flag2 = true;
-	bool flag = true;
-    for (index_t n = 0; n < num_; ++n) {
-      // transform image to col_buffer in order to use gemm
-      FLK_im2col_v3(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
-        in_data[conv::kKernelMasks].dptr<DType>(),
-		in_data[conv::kWeight].dptr<DType>(),
-		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
-        col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
-        col_buffer.dptr<DType>(), flag);
-	  flag = false;
-	  Tensor<xpu, 2, DType> output_2d = output_3d[n];
-	  Tensor<xpu, 3, DType> output_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
-	    Shape3(conv_out_channels_, K, N), s);
-	  //Tensor<xpu, 3, DType> output_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
-	    //Shape3(conv_out_channels_, K, N), s);
-	  output_2d = reduce_with_axis<red::sum, false>(output_buffer_3d, 1);
+    // no need to allocating memory and reordering in memory
+    if (is_1x1_) {
+      Tensor<xpu, 4, DType> input_4d = in_data[conv::kData].get_with_shape<xpu, 4, DType>(
+        Shape4(num_, group_, K, N), s);
+      for (index_t n = 0; n < num_; ++n) {
+        Tensor<xpu, 3, DType> input_3d = input_4d[n];
+        Tensor<xpu, 3, DType> output_3d = output_4d[n];
+        for (index_t g = 0; g < group_; ++g) {
+          linalg_gemm(weight_3d[g], input_3d[g], output_3d[g], false, false, s, req[conv::kOut]);
+        }
+      }
+    } else {
+      // allocate workspace for col_buffer
+      Tensor<xpu, 1, DType> workspace = ctx.requested[conv::kTempSpace]
+        .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_), s);
+      // calculate the shape of col_buffer
+      TShape col_buffer_shape(num_spatial_axes_ + 1);//3
+      col_buffer_shape[0] = conv_in_channels_ * param_.kernel_max;
+      for (index_t i = 1; i < col_buffer_shape.ndim(); ++i) {
+        col_buffer_shape[i] = out_data[0].shape_[i+1];
+      }
+      // create a column buffer using workspace and col_buffer_shape
+      TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
+      Tensor<xpu, 3, DType> col_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
+        Shape3(group_, K, N), s);
+      for (index_t n = 0; n < num_; ++n) {
+        // transform image to col_buffer in order to use gemm
+		FLK_im2col_v4(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
+			in_data[conv::kKernelMasks].dptr<DType>(),
+			in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
+			col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
+			col_buffer.dptr<DType>());
+        Tensor<xpu, 3, DType> output_3d = output_4d[n];
+        for (index_t g = 0; g < group_; ++g) {
+          // Legacy approach shown here for comparison:
+          //   Assign(output_3d[g], req[conv::kOut], dot(weight_3d[g], col_buffer_3d[g]));
+          linalg_gemm(weight_3d[g], col_buffer_3d[g], output_3d[g], false, false, s,
+            req[conv::kOut]);
+        }
+      }
     }
-	end = clock();
-	LOG(INFO) << "one convV3 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
 
     if (bias_term_) {
       Tensor<xpu, 1, DType> bias = in_data[conv::kBias].get<xpu, 1, DType>(s);
@@ -152,6 +159,8 @@ class FixLengthKernelConvolutionV3Op : public Operator {
       // has bias term, broadcast it to the same shape of output_3d in channel dim
       output_3d += mshadow::expr::broadcast<1>(bias, output_3d.shape_);
     }
+    end = clock();
+    LOG(INFO) << "total FLKconvV4 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
   }
 
   virtual void Backward(const OpContext &ctx,
@@ -164,75 +173,84 @@ class FixLengthKernelConvolutionV3Op : public Operator {
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(out_grad.size(), 1U);
-    size_t expected = param_.no_bias == 0 ? 4 : 3;
-    CHECK(in_data.size() == expected && in_grad.size() == expected);
+    // We expect 2 inputs: in data and weight. We don't need bias for
+    // computing gradient.
+    size_t expected = param_.no_bias == 0 ? 3 : 2;
+    CHECK_EQ(in_data.size(), expected);
+    CHECK_EQ(in_grad.size(), expected);
     CHECK_EQ(req.size(), expected);
     CHECK_EQ(in_data[conv::kWeight].CheckContiguous(), true);
-    LayerSetUp(in_grad[conv::kData].shape_,
-               in_grad[conv::kKernelMasks].shape_,
-               out_grad[conv::kOut].shape_);
+    LayerSetUp(in_data[conv::kData].shape_,
+               in_data[conv::kKernelMasks].shape_,
+               out_data[conv::kOut].shape_);
     Stream<xpu> *s = ctx.get_stream<xpu>();
-    // allocate workspace for col_buffer
-    Tensor<xpu, 1, DType> workspace = ctx.requested[conv::kTempSpace]
-      .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_), s);
-    // calculate the shape of col_buffer
-    TShape col_buffer_shape(num_spatial_axes_ + 1);
-    col_buffer_shape[0] = conv_in_channels_ * param_.kernel.Size();
-    for (index_t i = 1; i < col_buffer_shape.ndim(); ++i) {
-      col_buffer_shape[i] = out_grad[conv::kData].shape_[i + 1];
-    }
-    // create a column buffer using workspace and col_buffer_shape
-    TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
 
     // initialize weight and col_buffer 3D tensors for using gemm
     // For computing dLoss/d(in_data[kData])
-    index_t M = kernel_dim_; // Cin / group * kmax
-    index_t N = conv_out_spatial_dim_; // H*W
+    index_t M = kernel_dim_;
+    index_t N = conv_out_spatial_dim_;
     index_t K = conv_out_channels_ / group_;
     Tensor<xpu, 3, DType> weight_3d = in_data[conv::kWeight].get_with_shape<xpu, 3, DType>(
       Shape3(group_, K, M), s);
     Tensor<xpu, 4, DType> out_grad_4d = out_grad[conv::kOut].get_with_shape<xpu, 4, DType>(
       Shape4(num_, group_, K, N), s);
-    Tensor<xpu, 3, DType> col_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
-      Shape3(group_, M, N), s);
     // For computing dLoss/dWeight
     Tensor<xpu, 3, DType> dweight_3d = in_grad[conv::kWeight].get_with_shape<xpu, 3, DType>(
       Shape3(group_, K, M), s);
 
-    Tensor<xpu, 1, DType> data_grad = in_grad[conv::kData].FlatTo1D<xpu, DType>(s);
-    data_grad = 0;
-	bool flag = true;
-
-
-    for (index_t n = 0; n < num_; ++n) {
-      Tensor<xpu, 3, DType> out_grad_3d = out_grad_4d[n];
-      for (index_t g = 0; g < group_; ++g) {
-        // Legacy approach shown here for comparison:
-        //   col_buffer_3d[g] = dot(weight_3d[g].T(), out_grad_3d[g]);
-        linalg_gemm(weight_3d[g], out_grad_3d[g], col_buffer_3d[g], true, false, s);
+    // no need to allocating memory and reordering in memory
+    if (is_1x1_) {
+      Tensor<xpu, 4, DType> input_4d = in_data[conv::kData].get_with_shape<xpu, 4, DType>(
+        Shape4(num_, group_, M, N), s);
+      Tensor<xpu, 4, DType> in_grad_4d = in_grad[conv::kData].get_with_shape<xpu, 4, DType>(
+        Shape4(num_, group_, M, N), s);
+      for (index_t n = 0; n < num_; ++n) {
+        Tensor<xpu, 3, DType> input_3d = input_4d[n];
+        Tensor<xpu, 3, DType> in_grad_3d = in_grad_4d[n];
+        Tensor<xpu, 3, DType> out_grad_3d = out_grad_4d[n];
+        // gradient w.r.t. input data
+        for (index_t g = 0; g < group_; ++g) {
+          linalg_gemm(weight_3d[g], out_grad_3d[g], in_grad_3d[g], true, false, s);
+          auto request = (n == 0) ? req[conv::kWeight] : kAddTo;
+          linalg_gemm(out_grad_3d[g], input_3d[g], dweight_3d[g], false, true, s, request);
+        }
       }
+    } else {
+      // allocate workspace for col_buffer
+      Tensor<xpu, 1, DType> workspace = ctx.requested[conv::kTempSpace]
+        .get_space_typed<xpu, 1, DType>(Shape1(col_buffer_size_), s);
+      // calculate the shape of col_buffer
+      TShape col_buffer_shape(num_spatial_axes_ + 1);
+      col_buffer_shape[0] = conv_in_channels_ * param_.kernel.Size();
+      for (index_t i = 1; i < col_buffer_shape.ndim(); ++i) {
+        col_buffer_shape[i] = out_grad[conv::kData].shape_[i+1];
+      }
+      // create a column buffer using workspace and col_buffer_shape
+      TBlob col_buffer(workspace.dptr_, col_buffer_shape, xpu::kDevMask, DataType<DType>::kFlag);
+      Tensor<xpu, 3, DType> col_buffer_3d = col_buffer.get_with_shape<xpu, 3, DType>(
+        Shape3(group_, M, N), s);
+      for (index_t n = 0; n < num_; ++n) {
+        Tensor<xpu, 3, DType> out_grad_3d = out_grad_4d[n];
+        // gradient w.r.t. input data
+        for (index_t g = 0; g < group_; ++g) {
+          // Legacy approach shown here for comparison:
+          //   col_buffer_3d[g] = dot(weight_3d[g].T(), out_grad_3d[g]);
+          linalg_gemm(weight_3d[g], out_grad_3d[g], col_buffer_3d[g], true, false, s);
+        }
+        col2im(s, col_buffer.dptr<DType>(), in_grad[conv::kData].shape_, col_buffer.shape_,
+               param_.kernel, param_.pad, param_.stride, param_.dilate,
+               in_grad[conv::kData].dptr<DType>()+n*input_dim_, req[conv::kData]);
 
-      // gradient w.r.t. input data
-      FLK_col2im(s, col_buffer.dptr<DType>(),
-        in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
-        in_data[conv::kKernelMasks].shape_, in_grad[conv::kData].shape_, col_buffer.shape_,
-        param_.kernel, param_.pad, param_.stride, param_.dilate,
-        in_grad[conv::kData].dptr<DType>() + n*input_dim_,
-        req[conv::kData]);
-
-      // gradient w.r.t. weight, dWeight should accumulate across the batch and group
-      FLK_im2col_v2(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
-              in_data[conv::kKernelMasks].dptr<DType>() + n*kernel_masks_dim_,
-              in_data[conv::kWeight].dptr<DType>() + n*kernel_masks_dim_,
-      		in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
-              col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
-              col_buffer.dptr<DType>(), flag);
-
-      for (index_t g = 0; g < group_; ++g) {
-        auto request = (n == 0) ? req[conv::kWeight] : kAddTo;
-        // Legacy approach shown here for comparison:
-        //   Assign(dweight_3d[g], request, dot(out_grad_3d[g], col_buffer_3d[g].T()));
-        linalg_gemm(out_grad_3d[g], col_buffer_3d[g], dweight_3d[g], false, true, s, request);
+        // gradient w.r.t. weight, dWeight should accumulate across the batch and group
+        im2col(s, in_data[conv::kData].dptr<DType>()+n*input_dim_, in_data[conv::kData].shape_,
+               col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
+               col_buffer.dptr<DType>());
+        for (index_t g = 0; g < group_; ++g) {
+          auto request = (n == 0) ? req[conv::kWeight] : kAddTo;
+          // Legacy approach shown here for comparison:
+          //   Assign(dweight_3d[g], request, dot(out_grad_3d[g], col_buffer_3d[g].T()));
+          linalg_gemm(out_grad_3d[g], col_buffer_3d[g], dweight_3d[g], false, true, s, request);
+        }
       }
     }
 
@@ -240,7 +258,7 @@ class FixLengthKernelConvolutionV3Op : public Operator {
     if (bias_term_) {
       Tensor<xpu, 1, DType> dbias = in_grad[conv::kBias].get<xpu, 1, DType>(s);
       Tensor<xpu, 3, DType> dout = out_grad[conv::kOut].get_with_shape<xpu, 3, DType>(
-        Shape3(num_, conv_out_channels_, conv_out_spatial_dim_), s);
+          Shape3(num_, conv_out_channels_, conv_out_spatial_dim_), s);
       ASSIGN_DISPATCH(dbias, req[conv::kBias], sumall_except_dim<1>(dout));
     }
   }
@@ -272,7 +290,7 @@ class FixLengthKernelConvolutionV3Op : public Operator {
     col_offset_ = kernel_dim_ * conv_out_spatial_dim_;
     output_offset_ = conv_out_channels_ * conv_out_spatial_dim_ / group_;
     // size of the column buffer used for storing im2col-ed pixels
-    col_buffer_size_ = conv_out_channels_ * kernel_dim_ * group_ * conv_out_spatial_dim_;
+    col_buffer_size_ = kernel_dim_ * group_ * conv_out_spatial_dim_;
     // input/output image size (#channels * height * width)
     input_dim_ = ishape.ProdShape(1, ishape.ndim());
     kernel_masks_dim_ = kernel_masks_shape.ProdShape(1, kernel_masks_shape.ndim());
@@ -282,7 +300,7 @@ class FixLengthKernelConvolutionV3Op : public Operator {
   }
 
  private:
-  FixLengthKernelConvolutionV3Param param_;
+  FixLengthKernelConvolutionV4Param param_;
   index_t channel_axis_;  // channel axis of the input
   index_t channels_;  // number of channels of input image
   index_t num_spatial_axes_;  // number of spatial axes
@@ -304,16 +322,16 @@ class FixLengthKernelConvolutionV3Op : public Operator {
   index_t num_kernels_col2im_;
   bool bias_term_;  // has bias term?
   bool is_1x1_;
-};  // class ConvolutionV3Op
+};  // class ConvolutionV4Op
 
 template<typename xpu>
-Operator* CreateOp(FixLengthKernelConvolutionV3Param param, int dtype,
+Operator* CreateOp(FixLengthKernelConvolutionV4Param param, int dtype,
   std::vector<TShape> *in_shape,
   std::vector<TShape> *out_shape,
   Context ctx);
 
 #if DMLC_USE_CXX11
-class FixLengthKernelConvolutionV3Prop : public OperatorProperty {
+class FixLengthKernelConvolutionV4Prop : public OperatorProperty {
  public:
   std::vector<std::string> ListArguments() const override {
     if (!param_.no_bias) {
@@ -436,13 +454,13 @@ class FixLengthKernelConvolutionV3Prop : public OperatorProperty {
   }
 
   OperatorProperty* Copy() const override {
-    auto ptr = new FixLengthKernelConvolutionV3Prop();
+    auto ptr = new FixLengthKernelConvolutionV4Prop();
     ptr->param_ = param_;
     return ptr;
   }
 
   std::string TypeString() const override {
-    return "_contrib_FixLengthKernelConvolutionV3";
+    return "_contrib_FixLengthKernelConvolutionV4";
   }
 
   std::vector<int> DeclareBackwardDependency(
@@ -472,9 +490,9 @@ class FixLengthKernelConvolutionV3Prop : public OperatorProperty {
     std::vector<int> *in_type) const override;
 
  private:
-  FixLengthKernelConvolutionV3Param param_;
-};  // class ConvolutionV3Prop
+  FixLengthKernelConvolutionV4Param param_;
+};  // class ConvolutionV4Prop
 #endif  // DMLC_USE_CXX11
 }  // namespace op
 }  // namespace mxnet
-#endif  // MXNET_OPERATOR_CONTRIB_FLK_ConvolutionV3_INL_H_
+#endif  // MXNET_OPERATOR_CONTRIB_FLK_CONVOLUTION_INL_H_
