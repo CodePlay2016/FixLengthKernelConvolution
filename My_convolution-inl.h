@@ -84,8 +84,8 @@ class MyConvolutionOp : public Operator {
     const std::vector<OpReqType> &req,
     const std::vector<TBlob> &out_data,
     const std::vector<TBlob> &aux_args) {
-    clock_t sstart, start, end;
-    sstart = clock();
+    //clock_t sstart, end;
+    //sstart = clock();
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(req[conv::kOut], kWriteTo);
@@ -102,6 +102,7 @@ class MyConvolutionOp : public Operator {
     index_t M = conv_out_channels_ / group_;
     index_t N = conv_out_spatial_dim_;
     index_t K = kernel_dim_;
+	
     Tensor<xpu, 3, DType> weight_3d = in_data[conv::kWeight].get_with_shape<xpu, 3, DType>(
       Shape3(group_, M, K), s);
     Tensor<xpu, 4, DType> output_4d = out_data[conv::kOut].get_with_shape<xpu, 4, DType>(
@@ -136,10 +137,15 @@ class MyConvolutionOp : public Operator {
         Shape3(group_, K, N), s);
       for (index_t n = 0; n < num_; ++n) {
         // transform image to col_buffer in order to use gemm
-		start = clock();
+		//start = clock();
         im2col(s, in_data[conv::kData].dptr<DType>()+n*input_dim_, in_data[conv::kData].shape_,
                col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
                col_buffer.dptr<DType>());
+		//cudaDeviceSynchronize();
+		//if (flag) {
+		//	LOG(INFO) << "MyConv im2col time use " << (double)(clock()-start)/CLOCKS_PER_SEC;
+		//	flag=false;
+		//}
         Tensor<xpu, 3, DType> output_3d = output_4d[n];
 		//if (flag) {
 		//	LOG(INFO) << "My conv im2col time is " << (double)(clock() - start)/CLOCKS_PER_SEC;
@@ -161,8 +167,8 @@ class MyConvolutionOp : public Operator {
       // has bias term, broadcast it to the same shape of output_3d in channel dim
       output_3d += mshadow::expr::broadcast<1>(bias, output_3d.shape_);
     }
-    end = clock();
-    LOG(INFO) << "total Myconv time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
+    //end = clock();
+    //LOG(INFO) << "total Myconv time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
   }
 
   virtual void Backward(const OpContext &ctx,
@@ -371,17 +377,15 @@ class MyConvolutionProp : public OperatorProperty {
     }
     out_shape->resize(1, TShape());
     const TShape &dshp = (*in_shape)[conv::kData];
-    const TShape &wshp = (*in_shape)[conv::kWeight];
     if (dshp.ndim() == 0) return false;
     if (param_.kernel.ndim() == 2) {
       // 2d conv
       CHECK_EQ(dshp.ndim(), 4U) \
         << "Input data should be 4D in batch-num_filter-y-x";
-      CHECK_EQ(wshp.ndim(), 3U) \
-        << "Input weight should be 3D in num_filter-Cin-kmax";
       Shape<4> dshape = ConvertLayout(dshp.get<4>(), param_.layout.value(), kNCHW);
-      Shape<3> wshape = Shape3(param_.num_filter / param_.num_group, dshape[1] / param_.num_group,
-        param_.kernel_max);
+      Shape<4> wshape = Shape4(param_.num_filter / param_.num_group, dshape[1] / param_.num_group,
+        param_.kernel[0], param_.kernel[1]);
+	  wshape = ConvertLayout(wshape, kNCHW, param_.layout.value());
       wshape[0] *= param_.num_group;
       SHAPE_ASSIGN_CHECK(*in_shape, conv::kWeight, wshape);
       if (!param_.no_bias) {

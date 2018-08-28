@@ -22,8 +22,9 @@ __global__ void FLK_im2col_gpu_kernel_v4(const int n, const DType* data_im, // (
   const int stride_h, const int stride_w,
   const int dilation_h, const int dilation_w,
   const int height_col, const int width_col,
-  DType* data_col) { // (c_in*kmax,H,W,)
-  CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
+  DType* data_col, const bool flag) { // (c_in*kmax,H,W,)
+  //if (flag) printf("blockDim.x is %d, gridDim.x is %d\n", blockDim.x, gridDim.x);
+  CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cin*H*W
 	// index index of output matrix
     const int w_col = index % width_col; // index element in a certain width
     const int h_col = (index / width_col) % height_col; // index a width in a certain Height
@@ -54,7 +55,7 @@ inline void FLK_im2col_v4(mshadow::Stream<gpu>* s,
   const DType* data_im, const DType* kernel_mask, const TShape& km_shape,
   const TShape& im_shape, const TShape& col_shape, const TShape& kernel_shape,
   const TShape& pad, const TShape& stride, const TShape& dilation,
-  DType* data_col) {
+  DType* data_col, const bool flag) {
   // num_axes should be smaller than block size
   index_t num_spatial_axes = kernel_shape.ndim();
   CHECK_LT(num_spatial_axes, mshadow::cuda::kBaseThreadNum);
@@ -62,13 +63,16 @@ inline void FLK_im2col_v4(mshadow::Stream<gpu>* s,
   using namespace mxnet_op;
   switch (num_spatial_axes) {
   case 2:
-    FLK_im2col_gpu_kernel_v4<DType> // NOLINT_NEXT_LINE(whitespace/operators)
+	//if (flag){ LOG(INFO) << "num_blocks is " << cuda_get_num_blocks(num_kernels) 
+	//	<< "and kBaseThreadNum is " << mshadow::cuda::kBaseThreadNum;
+	//}
+	FLK_im2col_gpu_kernel_v4<DType> // NOLINT_NEXT_LINE(whitespace/operators)
         <<<cuda_get_num_blocks(num_kernels), mshadow::cuda::kBaseThreadNum,
            0, mshadow::Stream<gpu>::GetStream(s)>>>(
         num_kernels, data_im, kernel_mask, im_shape[2], im_shape[3], 
 		km_shape[1], kernel_shape[0], kernel_shape[1], 
         pad[0], pad[1], stride[0], stride[1], dilation[0], dilation[1],
-        col_shape[1], col_shape[2], data_col);
+        col_shape[1], col_shape[2], data_col, flag);
     MSHADOW_CUDA_POST_KERNEL_CHECK(FLK_im2col_gpu_kernel);
     break;
   default:
@@ -88,6 +92,7 @@ __global__ void FLK_im2col_gpu_kernel_v3(const int n, const DType* data_im, // (
   const int channel_in,  const int channel_out,
   const int height_col, const int width_col,
   DType* data_col, bool flag) { // (c_out*c_in*kmax,H,W,)
+  //if (flag) printf("V3blockDim.x is %d, gridDim.x is %d\n", blockDim.x, gridDim.x);
   CUDA_KERNEL_LOOP(index, n) { // n is total kernel number，here it is cout*cin*H*W
 	// index index of output matrix
     const int w_col = index % width_col; // index element in a certain width
@@ -133,7 +138,7 @@ inline void FLK_im2col_v3(mshadow::Stream<gpu>* s,
   switch (num_spatial_axes) {
   case 2:
     FLK_im2col_gpu_kernel_v3<DType> // NOLINT_NEXT_LINE(whitespace/operators)
-        <<<cuda_get_num_blocks(num_kernels), mshadow::cuda::kBaseThreadNum,
+        <<<cuda_get_num_blocks(km_shape[0] * num_kernels), mshadow::cuda::kBaseThreadNum,
            0, mshadow::Stream<gpu>::GetStream(s)>>>(
         num_kernels, data_im, kernel_mask, weight, im_shape[2], im_shape[3], 
 		km_shape[2], kernel_shape[0], kernel_shape[1], 

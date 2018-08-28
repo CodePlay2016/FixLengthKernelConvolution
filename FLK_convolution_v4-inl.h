@@ -85,8 +85,8 @@ class FixLengthKernelConvolutionV4Op : public Operator {
     const std::vector<OpReqType> &req,
     const std::vector<TBlob> &out_data,
     const std::vector<TBlob> &aux_args) {
-    clock_t sstart, end;
-    sstart = clock();
+    //clock_t sstart, end;
+    //sstart = clock();
     using namespace mshadow;
     using namespace mshadow::expr;
     CHECK_EQ(req[conv::kOut], kWriteTo);
@@ -108,7 +108,7 @@ class FixLengthKernelConvolutionV4Op : public Operator {
     Tensor<xpu, 4, DType> output_4d = out_data[conv::kOut].get_with_shape<xpu, 4, DType>(
       Shape4(num_, group_, M, N), s);
       
-	//bool flag = true;
+	bool flag = true;
 
     // no need to allocating memory and reordering in memory
     if (is_1x1_) {
@@ -137,11 +137,17 @@ class FixLengthKernelConvolutionV4Op : public Operator {
         Shape3(group_, K, N), s);
       for (index_t n = 0; n < num_; ++n) {
         // transform image to col_buffer in order to use gemm
+		//start = clock();
 		FLK_im2col_v4(s, in_data[conv::kData].dptr<DType>() + n*input_dim_,
 			in_data[conv::kKernelMasks].dptr<DType>(),
 			in_data[conv::kKernelMasks].shape_, in_data[conv::kData].shape_,
 			col_buffer.shape_, param_.kernel, param_.pad, param_.stride, param_.dilate,
-			col_buffer.dptr<DType>());
+			col_buffer.dptr<DType>(), flag);
+		//cudaDeviceSynchronize();
+		//if (flag) {
+		//	LOG(INFO) << "FLKconvV4 im2col time use " << (double)(clock()-start)/CLOCKS_PER_SEC;
+		//	flag=false;
+		//}
         Tensor<xpu, 3, DType> output_3d = output_4d[n];
         for (index_t g = 0; g < group_; ++g) {
           // Legacy approach shown here for comparison:
@@ -159,8 +165,8 @@ class FixLengthKernelConvolutionV4Op : public Operator {
       // has bias term, broadcast it to the same shape of output_3d in channel dim
       output_3d += mshadow::expr::broadcast<1>(bias, output_3d.shape_);
     }
-    end = clock();
-    LOG(INFO) << "total FLKconvV4 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
+    //end = clock();
+    //LOG(INFO) << "total FLKconvV4 time use " << (double)(end-sstart)/CLOCKS_PER_SEC;
   }
 
   virtual void Backward(const OpContext &ctx,
@@ -363,9 +369,9 @@ class FixLengthKernelConvolutionV4Prop : public OperatorProperty {
     std::vector<TShape> *aux_shape) const override {
     using namespace mshadow;
     if (!param_.no_bias) {
-      CHECK_EQ(in_shape->size(), 4U) << "Input:[data, offset, weight, bias]";
+      CHECK_EQ(in_shape->size(), 4U) << "Input:[data, mask, weight, bias]";
     } else {
-      CHECK_EQ(in_shape->size(), 3U) << "Input:[data, offset, weight]";
+      CHECK_EQ(in_shape->size(), 3U) << "Input:[data, mask, weight]";
     }
     out_shape->resize(1, TShape());
     const TShape &dshp = (*in_shape)[conv::kData];
